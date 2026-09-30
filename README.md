@@ -67,6 +67,8 @@ All lifecycle events are POSTed to `PAPERCLIP_WEBHOOK_URL`: `run.queued`, `run.s
 
 > This event schema is generic. Point `PAPERCLIP_WEBHOOK_URL` at your Paperclip instance's ingest endpoint, or at a small adapter or n8n workflow that maps these events onto Paperclip's task and board API. Event delivery is fire-and-forget: if Paperclip is offline, QA runs are not affected.
 
+> **Full walkthrough:** [SETUP.md](SETUP.md) (macOS) or [SETUP-windows.md](SETUP-windows.md) (Windows) takes you through setting up Ollama, the test repo, this service, Paperclip, n8n and Jira/Xray in order, with a check after each phase.
+
 ## Prerequisites
 
 | Tool | Version | Install (macOS) |

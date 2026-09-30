@@ -607,6 +607,11 @@ def run_command(
     """
     started = time.monotonic()
     merged_env = {**os.environ, **(env or {})}
+    # Resolve the executable through PATH/PATHEXT so Windows shims such as
+    # `pnpm.cmd` are found without resorting to shell=True.
+    resolved = shutil.which(args[0], path=merged_env.get("PATH"))
+    if resolved:
+        args = [resolved, *args[1:]]
     try:
         proc = subprocess.run(
             args,
@@ -664,6 +669,7 @@ class TestRepository:
     def _git_env(self) -> Dict[str, str]:
         env = {
             "GIT_TERMINAL_PROMPT": "0",  # never hang waiting for a username/password prompt
+            "GCM_INTERACTIVE": "never",  # Git Credential Manager (Windows/macOS): no login pop-ups
             "GIT_AUTHOR_NAME": self.settings.git_author_name,
             "GIT_AUTHOR_EMAIL": self.settings.git_author_email,
             "GIT_COMMITTER_NAME": self.settings.git_author_name,
@@ -760,7 +766,7 @@ class TestRepository:
             raise CommandError(f"TEST_SPEC_DIR escapes the repository: {self.settings.test_spec_dir}")
         spec_dir.mkdir(parents=True, exist_ok=True)
         spec_path = spec_dir / f"{ticket_id}.spec.ts"
-        spec_path.write_text(code, encoding="utf-8")
+        spec_path.write_text(code, encoding="utf-8", newline="\n")  # LF on every OS
         rel_spec = spec_path.relative_to(self.path).as_posix()
         logs.append(f"[info] wrote {rel_spec} ({len(code):,} bytes)")
 
