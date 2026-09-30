@@ -154,12 +154,12 @@ Copy-Item .env.example .env
 
 | Variable | Value |
 |---|---|
-| `ANTHROPIC_API_KEY` | A key from **console.anthropic.com → API Keys** |
+| `ANTHROPIC_API_KEY` | A key from **console.anthropic.com → API Keys**. The key's workspace needs access to `claude-opus-5-5` and `claude-sonnet-5-5` |
 | `GITHUB_TOKEN` | The token from step 3.5 |
 | `TEST_REPO_URL` | `https://github.com/reginAbdu/qa-playwright-tests.git` |
 | `TEST_REPO_LOCAL_PATH` | `C:/qa-agent/qa-playwright-tests` (a **new, non-existent** folder with a short path) |
 | `QA_SERVICE_API_KEY` | The value from step 4.3 |
-| `PAPERCLIP_WEBHOOK_URL` | Leave **empty** for now (see Phase 5.5) |
+| `PAPERCLIP_API_URL` / `PAPERCLIP_API_KEY` | Leave **empty** for now; you'll fill them in at step 5.5 |
 
 **4.5** Start the service and leave it running in its own tab. It binds to `127.0.0.1`, so Windows Firewall won't prompt.
 
@@ -189,13 +189,25 @@ npx --registry https://registry.npmjs.org paperclipai onboard --yes
 
 > **If Paperclip fails on Windows:** it runs its own embedded Postgres database, and native Windows support is less proven than macOS and Linux. If onboarding fails, run Paperclip inside **WSL2** instead. Install WSL (`wsl --install`, then reboot), install Node 24 inside Ubuntu, and run the same `npx … onboard` command there. WSL2 forwards `localhost` ports, so Paperclip is still reachable at `http://localhost:3100` from Windows. Everything else in this guide stays on native Windows.
 
-**5.3** In the UI, create the **company** (`QA Lab`), the **project** (`QA Automation`) and the **agent** (`QA Pipeline`): HTTP adapter, heartbeat **off**. The steps are the same as [SETUP.md → step 5.3](SETUP.md#phase-5--paperclip-control-room).
+**5.3** In the UI, create the **company** (`QA Lab`), the **project** (`QA Automation`) and the **agent** (`QA Pipeline`), exactly as in [SETUP.md → step 5.3](SETUP.md#phase-5--paperclip-control-room). Use the *HTTP* adapter, turn the **heartbeat off**, and turn **Wake on demand off**. Wake on demand is on by default, and while it's on, Paperclip tries to run the agent every time the service assigns it a QA issue.
 
-**5.4** Set the agent's **monthly budget**, then create an **API key**. Note the key, the company ID and the agent ID.
+**5.4** Set the agent's **monthly budget**, then create an **API key** for it and copy the key. You don't need any IDs: the service looks up the agent and company from the key.
 
-**5.5** Connecting the service to Paperclip is **not ready yet.** Keep `PAPERCLIP_WEBHOOK_URL` empty until `main.py` has a native Paperclip adapter. Runs aren't affected: each event is still written to the service's log.
+**5.5** Connect the service. Open `C:\code\TAF\.env` and set:
 
-✅ **Check:** the `QA Pipeline` agent is listed under `QA Lab` and shows its budget.
+| Variable | Value |
+|---|---|
+| `PAPERCLIP_API_URL` | `http://localhost:3100` (without `/api`) |
+| `PAPERCLIP_API_KEY` | The key from step 5.4 |
+| `PAPERCLIP_PROJECT` | `QA Automation` |
+
+Then restart the QA service: press `Ctrl+C` in its tab and run the command from step 4.5 again.
+
+✅ **Check:** in the health output below, the `paperclip` section should show `reachable: True`, `wake_on_demand: False`, `heartbeat_enabled: False` and an empty `warnings` list.
+
+```powershell
+(Invoke-RestMethod http://localhost:8000/health).paperclip | ConvertTo-Json -Depth 5
+```
 
 ---
 
@@ -217,17 +229,29 @@ n8n listens on all network interfaces, so **Windows Firewall will ask** whether 
 
 Build this workflow exactly as in [SETUP.md → Phase 7](SETUP.md#phase-7--n8n-workflow-b-results--jira--xray). The callback URL is the same: `http://localhost:5678/webhook/qa-result`.
 
-✅ **Check (PowerShell version).** Send a fake callback. Replace `SHOP-1` with a real ticket in *Ready for QA*; note that this will transition that issue.
+This includes the **automatic Xray import** (steps 7.7–7.12) and the Custom Auth credential `Xray` from step 6.4.
+
+✅ **Check (PowerShell version).** Send a fake callback. Replace `SHOP-1` / `SHOP` with a real ticket in *Ready for QA* and its project key. Note that this **transitions that issue and creates one real Xray test**, which you can delete afterwards. The `-Depth 10` matters: without it, PowerShell silently truncates the nested test data.
 
 ```powershell
-$body = @{ ticket_id = "SHOP-1"; status = "QA Failed"; report_markdown = "## test report"; xray_csv_content = "`"Test ID`",`"Summary`"`n`"TC-001`",`"demo`"`n" } | ConvertTo-Json
+$body = @{
+  ticket_id = "SHOP-1"; status = "QA Failed"; report_markdown = "## test report"
+  xray_csv_content = "`"Test ID`",`"Summary`"`n`"TC-001`",`"demo`"`n"
+  xray_tests_json = @(@{
+    testtype = "Manual"
+    fields = @{ summary = "[SHOP-1] TC-001 setup check"; project = @{ key = "SHOP" } }
+    steps = @(@{ action = "Open the home page"; data = ""; result = "Page loads" })
+    update = @{ issuelinks = @(@{ add = @{ type = @{ name = "Test" }; outwardIssue = @{ key = "SHOP-1" } } }) }
+    xray_test_repository_folder = "AI QA/SHOP-1"
+  })
+} | ConvertTo-Json -Depth 10
 ```
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri http://localhost:5678/webhook/qa-result -ContentType "application/json" -Body $body
 ```
 
-The issue should move to *QA Failed*, with a comment and a CSV attachment.
+The issue should move to *QA Failed*, with the report comment, an `Xray import successful: SHOP-…` comment, and the new test linked in its Xray coverage panel.
 
 ---
 

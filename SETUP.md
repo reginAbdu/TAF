@@ -168,12 +168,12 @@ openssl rand -hex 32
 
 | Variable | Value |
 |---|---|
-| `ANTHROPIC_API_KEY` | A key from **console.anthropic.com → API Keys** (a claude.ai subscription doesn't include API access) |
+| `ANTHROPIC_API_KEY` | A key from **console.anthropic.com → API Keys** (a claude.ai subscription doesn't include API access). The key's workspace needs access to `claude-opus-5-5` and `claude-sonnet-5-5` |
 | `GITHUB_TOKEN` | The token from step 3.4 |
 | `TEST_REPO_URL` | `https://github.com/reginAbdu/qa-playwright-tests.git` |
 | `TEST_REPO_LOCAL_PATH` | `/Users/regina/qa-agent/qa-playwright-tests` (a **new, non-existent** folder) |
 | `QA_SERVICE_API_KEY` | The value from step 4.3 |
-| `PAPERCLIP_WEBHOOK_URL` | Leave **empty** for now (see Phase 5.6) |
+| `PAPERCLIP_API_URL` / `PAPERCLIP_API_KEY` | Leave **empty** for now; you'll fill them in at step 5.6 |
 
 **4.5** Start the service and leave it running in its own tab:
 
@@ -181,7 +181,7 @@ openssl rand -hex 32
 cd ~/Documents/TAF && source .venv/bin/activate && uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-✅ **Check:** in `/health`, `claude_configured`, `tools.git` and `tools.pnpm` should all be `true`. `is_git_clone` stays `false` until the first run clones the repo.
+✅ **Check:** in `/health`, `claude_configured`, `tools.git` and `tools.pnpm` should all be `true`. `claude_routes` shows which model each agent uses. `is_git_clone` stays `false` until the first run clones the repo.
 
 ```bash
 curl -s http://localhost:8000/health | python3 -m json.tool
@@ -205,17 +205,32 @@ npx --registry https://registry.npmjs.org paperclipai onboard --yes
 
 1. A **company** named `QA Lab`.
 2. A **project** named `QA Automation`.
-3. An **agent** named `QA Pipeline`:
-   - **Adapter:** *HTTP*. Set its URL to `http://localhost:8000/health`. Paperclip only needs the agent to exist here; **n8n** starts the runs, not Paperclip.
-   - **Heartbeat / schedule:** turn it **off**, so Paperclip never wakes the agent by itself.
+3. An **agent** named `QA Pipeline`. This agent is the identity the QA service acts as. **n8n** starts the runs, not Paperclip, so Paperclip must never try to run this agent itself:
+   - **Adapter:** *HTTP*, URL `http://localhost:8000/health`. The adapter is never actually used, but Paperclip requires one.
+   - **Heartbeat:** **off**.
+   - **Wake on demand:** **off**. This one matters: it's *on* by default, and while it's on, Paperclip tries to run the agent every time the service assigns it a QA issue.
 
-**5.4** Set the agent's **monthly budget** (for example $50). Paperclip pauses agents that go over their budget. This works alongside the service's own `MAX_CLOUD_TOKENS_PER_RUN` / `_PER_DAY` caps in `.env`.
+**5.4** Set the agent's **monthly budget** (for example $50). The service books the cost of every Claude call against this budget. When Paperclip pauses the agent for going over budget, the service stops making Claude calls immediately, and the ticket gets a `QA Failed` result that explains why. The local `MAX_CLOUD_TOKENS_PER_RUN` / `_PER_DAY` caps in `.env` also still apply.
 
-**5.5** Create an **API key** for the agent. Write down the key, the **company ID** and the **agent ID** (both are in the page URLs).
+**5.5** Create an **API key** for the `QA Pipeline` agent and copy it. You don't need to note any IDs: the service looks up the agent and company from the key.
 
-**5.6** Connecting the service to Paperclip is **not ready yet.** The service currently sends generic events to one URL (`PAPERCLIP_WEBHOOK_URL`). Paperclip's REST API instead expects issues, comments and cost events under `/api`. Keep `PAPERCLIP_WEBHOOK_URL` empty until `main.py` has a native Paperclip adapter. Runs aren't affected in the meantime: each event is still written to the service's log.
+**5.6** Connect the service. In `~/Documents/TAF/.env` set:
 
-✅ **Check:** the `QA Pipeline` agent is listed under `QA Lab` and shows its budget.
+| Variable | Value |
+|---|---|
+| `PAPERCLIP_API_URL` | `http://localhost:3100` (without `/api`) |
+| `PAPERCLIP_API_KEY` | The key from step 5.5 |
+| `PAPERCLIP_PROJECT` | `QA Automation` |
+
+Then restart the QA service: press `Ctrl+C` in its tab and run the uvicorn command from step 4.5 again.
+
+✅ **Check:** the service's startup log says `Paperclip connected as agent 'QA Pipeline'`. In the health output below, the `paperclip` section should show `"reachable": true`, `"wake_on_demand": false`, `"heartbeat_enabled": false` and `"warnings": []`.
+
+```bash
+curl -s http://localhost:8000/health | python3 -m json.tool
+```
+
+If `warnings` is not empty, it says what to change in Paperclip.
 
 ---
 
@@ -233,7 +248,7 @@ Open **http://localhost:5678** and create the owner account. The tunnel is for d
 
 **6.3** Create an **Xray API key.** In Jira, go to **Apps → Xray → API Keys → Create API Key**, and copy the client ID and secret.
 
-**6.4** In n8n, go to **Overview → Credentials → Create credential** and add these four:
+**6.4** In n8n, go to **Overview → Credentials → Create credential** and add these five:
 
 | Credential type | Name | Fields |
 |---|---|---|
@@ -241,8 +256,9 @@ Open **http://localhost:5678** and create the owner account. The tunnel is for d
 | **GitHub API** | `GitHub` | A classic PAT with `repo` read access to the **application** repo, where the PRs live |
 | **Header Auth** | `QA Service` | Name `X-API-Key`, value = your `QA_SERVICE_API_KEY` |
 | **Header Auth** | `GitHub Diff` | Name `Authorization`, value `Bearer <same GitHub PAT>` |
+| **Custom Auth** | `Xray` | JSON: `{"body": {"client_id": "<XRAY_CLIENT_ID>", "client_secret": "<XRAY_CLIENT_SECRET>"}}` (from step 6.3) |
 
-✅ **Check:** each credential shows **Connection tested successfully**. Header Auth credentials have no test, which is fine.
+✅ **Check:** each credential shows **Connection tested successfully**. Header Auth and Custom Auth credentials have no test, which is fine.
 
 ---
 
@@ -282,29 +298,58 @@ Note the `id` values for the transitions to QA Passed and QA Failed.
 
 API **v2** is used because it accepts a plain string. Jira doesn't render Markdown, so tables appear as plain text.
 
-**7.7 Convert to File — `CSV file`.**
-- **Operation:** *Convert to Text File*
-- **Text Input Field:** `{{ $('Webhook').item.json.body.xray_csv_content }}`
-- **File Name:** `{{ $('Webhook').item.json.body.ticket_id }}-xray-tests.csv`
+**7.7 IF node — `Has Xray tests?`.** Connect it after `Add report comment`.
+- Condition (Number): `{{ ($('Webhook').item.json.body.xray_tests_json || []).length }}` **is larger than** `0`
 
-**7.8 HTTP Request — `Attach CSV to issue`.**
+If a run stopped before the test plan was written (for example, because of the budget guard), there's nothing to import, and the false branch simply ends.
+
+**7.8 HTTP Request — `Xray authenticate`** (true branch).
 - **Method:** `POST`
-- **URL:** `https://<you>.atlassian.net/rest/api/3/issue/{{ $('Webhook').item.json.body.ticket_id }}/attachments`
+- **URL:** `https://xray.cloud.getxray.app/api/v2/authenticate`
+- **Authentication:** *Generic Credential Type* → **Custom Auth** → `Xray`
+- **Options → Response → Response Format:** **Text**, put output in field `token`
+
+Xray returns the token as a quoted string, which is why the next node removes the quotes.
+
+**7.9 HTTP Request — `Xray import tests`.**
+- **Method:** `POST`
+- **URL:** `https://xray.cloud.getxray.app/api/v2/import/test/bulk`
+- **Header:** `Authorization` = `Bearer {{ $('Xray authenticate').item.json.token.replace(/"/g, '') }}`
+- **Body:** JSON, *Using JSON* → `{{ JSON.stringify($('Webhook').item.json.body.xray_tests_json) }}`
+
+This creates one Manual test per test case, with its steps. The tests are filed in the Xray folder `AI QA/<TICKET>` and linked to the story, so they appear in the story's Xray test-coverage panel. The response is `{"jobId": "…"}`.
+
+**7.10 Wait node** — **15 seconds**. The import runs as a background job on Xray's side.
+
+**7.11 HTTP Request — `Xray import status`.**
+- **Method:** `GET`
+- **URL:** `https://xray.cloud.getxray.app/api/v2/import/test/bulk/{{ $('Xray import tests').item.json.jobId }}/status`
+- **Header:** `Authorization` = the same value as in 7.9
+
+**7.12 HTTP Request — `Comment import result`.** This records the result on the ticket, so a failed import doesn't go unnoticed.
+- **Method:** `POST`
+- **URL:** `https://<you>.atlassian.net/rest/api/2/issue/{{ $('Webhook').item.json.body.ticket_id }}/comment`
 - **Authentication:** `Jira`
-- **Header:** `X-Atlassian-Token: no-check`
-- **Body:** *Form-Data* → parameter type **n8n Binary File**, name `file`, input field `data`
+- **Body:** JSON, *Using Fields Below* → name `body`, value:
+  `{{ 'Xray import ' + $json.status + ': ' + ($json.result?.issues || []).map(i => i.key).join(', ') + (($json.result?.errors || []).length ? ' | errors: ' + JSON.stringify($json.result.errors) : '') }}`
 
-Importing into Xray is, for now, a **manual** step: in Jira, go to **Xray → Test Case Importer → CSV** and upload the attached file. Map `Test ID` to the grouping column, `Action`/`Data`/`Expected Result` to the step fields, and `Requirement` to the link. Save the mapping as a configuration so later imports take one click. Xray Cloud's REST import takes JSON rather than CSV, so a fully automatic import needs the service to also return JSON (a planned change).
+A `status` of `working` means Xray hasn't finished yet. If that happens regularly, raise the wait in 7.10.
 
-**7.9** Click **Save**, then turn the **Active** toggle on.
+**7.13 (Optional) Attach the CSV as an audit copy.** From `Add report comment`, add a second branch:
+1. **Convert to File — `CSV file`:** operation *Convert to Text File*, text input field `{{ $('Webhook').item.json.body.xray_csv_content }}`, file name `{{ $('Webhook').item.json.body.ticket_id }}-xray-tests.csv`.
+2. **HTTP Request — `Attach CSV to issue`:** `POST https://<you>.atlassian.net/rest/api/3/issue/{{ $('Webhook').item.json.body.ticket_id }}/attachments`, authentication `Jira`, header `X-Atlassian-Token: no-check`, body *Form-Data* → parameter type **n8n Binary File**, name `file`, input field `data`.
 
-✅ **Check:** send a fake callback. Use a real ticket key that is in *Ready for QA*, and note that this will transition that issue.
+The CSV can also be imported by hand through **Xray → Test Case Importer** if the API import ever fails.
+
+**7.14** Click **Save**, then turn the **Active** toggle on.
+
+✅ **Check:** send a fake callback. Use a real ticket key that is in *Ready for QA*. Note that this **transitions that issue and creates one real Xray test**, which you can delete afterwards.
 
 ```bash
-curl -s -X POST http://localhost:5678/webhook/qa-result -H 'Content-Type: application/json' -d '{"ticket_id":"SHOP-1","status":"QA Failed","report_markdown":"## test report","xray_csv_content":"\"Test ID\",\"Summary\"\n\"TC-001\",\"demo\"\n"}'
+curl -s -X POST http://localhost:5678/webhook/qa-result -H 'Content-Type: application/json' -d '{"ticket_id":"SHOP-1","status":"QA Failed","report_markdown":"## test report","xray_csv_content":"\"Test ID\",\"Summary\"\n\"TC-001\",\"demo\"\n","xray_tests_json":[{"testtype":"Manual","fields":{"summary":"[SHOP-1] TC-001 setup check","project":{"key":"SHOP"}},"steps":[{"action":"Open the home page","data":"","result":"Page loads"}],"update":{"issuelinks":[{"add":{"type":{"name":"Test"},"outwardIssue":{"key":"SHOP-1"}}}]},"xray_test_repository_folder":"AI QA/SHOP-1"}]}'
 ```
 
-The issue should move to *QA Failed*, with a comment and a CSV attachment.
+The issue should move to *QA Failed*, with the report comment, an `Xray import successful: SHOP-…` comment, and the new test linked in its Xray coverage panel.
 
 ---
 
@@ -376,7 +421,8 @@ The issue should move to *QA Failed*, with a comment and a CSV attachment.
 | `curl -s -H "X-API-Key: <key>" http://localhost:8000/qa/runs/<run_id>` | `status` goes from `running` to `completed`, with an `outcome` |
 | GitHub test repo | A new branch `qa/<TICKET>` containing `tests/qa/<TICKET>.spec.ts` |
 | n8n → **Executions** | Workflow B runs when the service calls back |
-| Jira ticket | Status changed, report comment added, CSV attached |
+| Paperclip board (`QA Automation`) | Issue `[TICKET] …` in *In progress*, with a comment as each agent finishes. It ends in *Done* (passed) or *Blocked* (failed), and its cost appears on the agent's spend |
+| Jira ticket | Status changed, report comment added, Xray tests linked and filed under `AI QA/<TICKET>` |
 
 Most runs take 3–10 minutes; the Playwright step is the slowest.
 
@@ -395,5 +441,13 @@ Most runs take 3–10 minutes; the Playwright step is the slowest.
 | `Cannot check out base branch` | Someone edited files in `TEST_REPO_LOCAL_PATH`. Discard the changes there; that clone belongs to the agent. |
 | Report says "Local report synthesizer unavailable" | Ollama isn't running (`ollama serve`). The run still completes, using a simpler report. |
 | `BUDGET GUARD` in the report | A token cap was hit. Raise `MAX_CLOUD_TOKENS_PER_RUN`, or look into why that ticket needed so much. |
+| `/health` shows `paperclip.reachable: false` | Paperclip isn't running, or `PAPERCLIP_API_URL` is wrong. It should be `http://localhost:3100`, without `/api`. |
+| Paperclip returns `401` / `403` in the service log | `PAPERCLIP_API_KEY` isn't an *agent* key for `QA Pipeline`. Create one on that agent's page. |
+| Paperclip keeps starting runs of the QA agent on its own | *Wake on demand* or the heartbeat is still on (step 5.3). `/health` warns about this. |
+| `BUDGET GUARD - Paperclip agent is paused` | Paperclip paused the agent, usually because its monthly budget was hit. Raise the budget or resume the agent in Paperclip. |
+| Xray import comment shows `errors` mentioning the link type | Your Jira has no *Test* link type. Set `XRAY_REQUIREMENT_LINK_TYPE` to Xray's link type on your site (see Jira → Settings → Issues → Issue linking). |
+| Xray import errors mention `project` | The tests go to the ticket's project by default. Set `XRAY_PROJECT_KEY` if tests live in a different project. |
+| Xray import errors mention `priority` | Keep `XRAY_INCLUDE_PRIORITY=false`: your Jira uses different priority names. |
+| `Xray authenticate` returns 401 | Wrong client ID or secret in the `Xray` Custom Auth credential, or the API key was revoked. |
 | Workflow B returns 404 | The workflow isn't active, or the callback URL uses `/webhook-test/` instead of `/webhook/`. |
 | Jira transition returns 400 | Wrong transition ID, or that transition isn't allowed from the issue's current status. |
